@@ -1,4 +1,4 @@
-# 📚 Library Book Borrowing System
+# Library Book Borrowing System
 
 A backend REST API for managing a library's books, members, and borrowing records. Built with **ASP.NET Core 8** and **Entity Framework Core**.
 
@@ -6,7 +6,7 @@ A backend REST API for managing a library's books, members, and borrowing record
 
 ---
 
-## 🚀 Running the Project
+## Running the Project
 
 ### Prerequisites
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8)
@@ -26,7 +26,7 @@ Open `LibraryAPI/LibraryAPI.http` in VS Code with the REST Client extension and 
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 LibraryAPI/
