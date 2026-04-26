@@ -11,23 +11,23 @@ namespace LibraryAPI.Services;
 /// Layer: Service
 ///
 /// Responsible for:
-/// - DTO mapping (entity → response DTO)
-/// - Business rule validation (AvailableCopies <= TotalCopies)
-/// - Cache management (read from cache, write to cache, invalidate on write)
+/// - DTO mapping (Book entity → BookResponseDto)
+/// - Business rule validation (AvailableCopies must not exceed TotalCopies)
+/// - Cache management: reading from cache, populating cache, invalidating on writes
 ///
-/// NOT responsible for: HTTP status codes, DbContext access.
+/// NOT responsible for: HTTP status codes or direct database access.
 ///
-/// IMemoryCache is injected here (not in the controller) because caching is a
-/// business/performance concern, not an HTTP-transport concern. The cache stores
-/// BookResponseDtos so we don't need to re-map entities on every cache hit.
+/// Why cache here and not in the controller?
+/// Caching is a performance/business concern, not an HTTP-transport concern.
+/// The controller should not know where data comes from — only that it got data.
 /// </summary>
 public class BookService : IBookService
 {
     private readonly IBookRepository _repo;
     private readonly IMemoryCache _cache;
 
-    // Constant so the same string is used for both Set and Remove — a typo in one place
-    // would otherwise silently create a second cache entry instead of invalidating the first.
+    // A constant key prevents typos that would silently create a second cache entry
+    // instead of hitting the one we intend.
     private const string BooksCacheKey = "all_books";
 
     public BookService(IBookRepository repo, IMemoryCache cache)
@@ -37,28 +37,32 @@ public class BookService : IBookService
     }
 
     /// <summary>
-    /// Returns all books. Serves from IMemoryCache when available to avoid a DB hit
-    /// on every request. Cache expires after 5 minutes (TTL) AND is explicitly
-    /// invalidated on any write operation so callers never see stale data after a change.
+    /// Returns all books. Serves from IMemoryCache on subsequent calls to avoid
+    /// a database round-trip on every request.
+    ///
+    /// Cache strategy:
+    /// - TTL of 5 minutes as a safety net (in case invalidation is missed)
+    /// - Explicit invalidation on every write (create, update, delete) as the
+    ///   primary freshness mechanism — we don't want to wait 5 minutes after a change
     /// </summary>
     public async Task<IEnumerable<BookResponseDto>> GetAllAsync()
     {
+        // Return cached list if available
         if (_cache.TryGetValue(BooksCacheKey, out IEnumerable<BookResponseDto>? cached) && cached != null)
             return cached;
 
+        // Cache miss — query database, map to DTOs, store in cache
         var books = await _repo.GetAllAsync();
         var dtos = books.Select(MapToDto).ToList();
 
-        // TTL is a safety net. Explicit invalidation (InvalidateCache) is the primary
-        // mechanism — we don't want to wait 5 minutes for fresh data after a write.
         _cache.Set(BooksCacheKey, dtos, TimeSpan.FromMinutes(5));
         return dtos;
     }
 
     /// <summary>
-    /// Returns a single book or throws NotFoundException.
-    /// Does NOT use the list cache to avoid returning a stale single entry when only
-    /// one book was updated; the list cache is a separate concern.
+    /// Returns a single book by id. Does not use the list cache because we want
+    /// accurate per-book data even if the list cache is slightly stale.
+    /// Throws NotFoundException if the id does not exist.
     /// </summary>
     public async Task<BookResponseDto> GetByIdAsync(int id)
     {
@@ -70,14 +74,12 @@ public class BookService : IBookService
     }
 
     /// <summary>
-    /// Creates a new book after validating the AvailableCopies <= TotalCopies business rule.
-    /// Invalidates the cache because the cached list no longer represents current data.
+    /// Creates a new book after enforcing the AvailableCopies <= TotalCopies business rule.
+    /// Invalidates the list cache so the next GET /api/books reflects the new book.
     /// </summary>
     public async Task<BookResponseDto> CreateAsync(BookRequestDto dto)
     {
-        // Service-level business rule: you can't have more available copies than total copies.
-        // The controller annotation only ensures AvailableCopies >= 0 and TotalCopies >= 1;
-        // this cross-field rule must be checked here.
+        // Cross-field business rule — cannot be expressed with a single data annotation
         if (dto.AvailableCopies > dto.TotalCopies)
             throw new BadRequestException("AvailableCopies cannot exceed TotalCopies");
 
@@ -93,13 +95,14 @@ public class BookService : IBookService
         await _repo.AddAsync(book);
         await _repo.SaveChangesAsync();
 
+        // Invalidate AFTER save succeeds — never invalidate if the write failed
         InvalidateCache();
         return MapToDto(book);
     }
 
     /// <summary>
-    /// Updates an existing book. Both existence and business-rule checks happen before any
-    /// write. Cache is invalidated after the successful save.
+    /// Updates an existing book. Enforces business rules before writing.
+    /// Invalidates the cache so the list reflects the updated data immediately.
     /// </summary>
     public async Task<BookResponseDto> UpdateAsync(int id, BookRequestDto dto)
     {
@@ -123,7 +126,8 @@ public class BookService : IBookService
     }
 
     /// <summary>
-    /// Deletes a book. Invalidates the cache so the list endpoint reflects the removal.
+    /// Deletes a book. Invalidates the cache so the deleted book no longer appears
+    /// in subsequent GET /api/books responses.
     /// </summary>
     public async Task DeleteAsync(int id)
     {
@@ -138,9 +142,8 @@ public class BookService : IBookService
     }
 
     /// <summary>
-    /// Removes the all-books cache entry. Called after any write operation.
-    /// Must be called AFTER SaveChangesAsync succeeds — we never want to serve stale
-    /// data, but we also don't want to invalidate if the write failed.
+    /// Removes the cached book list. Called after any successful write operation.
+    /// The next call to GetAllAsync will query the database and repopulate the cache.
     /// </summary>
     private void InvalidateCache()
     {
@@ -148,8 +151,8 @@ public class BookService : IBookService
     }
 
     /// <summary>
-    /// Converts a Book entity to a BookResponseDto.
-    /// Kept private in the service — mapping is a service concern, not a controller concern.
+    /// Maps a Book entity to a BookResponseDto.
+    /// Private to the service — mapping is a service concern, not a controller concern.
     /// </summary>
     private static BookResponseDto MapToDto(Book book) => new BookResponseDto
     {

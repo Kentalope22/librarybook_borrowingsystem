@@ -9,12 +9,12 @@ namespace LibraryAPI.Repositories;
 /// Concrete EF Core implementation of IBookRepository.
 /// Layer: Repository
 ///
-/// This is the ONLY class in the project allowed to use LibraryDbContext directly.
-/// Services must not import DbContext — all DB access goes through repository interfaces.
+/// This is the ONLY class allowed to directly use LibraryDbContext for book data.
+/// All database access for books goes through this class — services must not import DbContext.
 ///
-/// Constructor injection receives the scoped DbContext provided by DI. Using scoped
-/// lifetime for both the repository and the DbContext means each HTTP request gets its
-/// own context instance, preventing cross-request state contamination.
+/// The repository receives a scoped DbContext from DI. Because both the repository
+/// and DbContext are Scoped, they share the same instance within one HTTP request,
+/// which keeps change tracking consistent.
 /// </summary>
 public class BookRepository : IBookRepository
 {
@@ -26,8 +26,9 @@ public class BookRepository : IBookRepository
     }
 
     /// <summary>
-    /// Returns all books as a list. ToListAsync materializes the query immediately so the
-    /// caller doesn't accidentally enumerate over a disposed context later.
+    /// Returns all books from the database as a materialized list.
+    /// ToListAsync executes the query immediately so the caller does not
+    /// enumerate a query over a disposed DbContext.
     /// </summary>
     public async Task<List<Book>> GetAllAsync()
     {
@@ -35,8 +36,10 @@ public class BookRepository : IBookRepository
     }
 
     /// <summary>
-    /// FindAsync uses the primary-key cache before hitting the DB, making single-record
-    /// lookups slightly faster than FirstOrDefaultAsync.
+    /// Looks up a book by primary key. FindAsync checks the EF Core identity cache
+    /// before hitting the database, making repeated lookups within a request faster
+    /// than FirstOrDefaultAsync would be.
+    /// Returns null if no book with that id exists.
     /// </summary>
     public async Task<Book?> GetByIdAsync(int id)
     {
@@ -44,19 +47,27 @@ public class BookRepository : IBookRepository
     }
 
     /// <summary>
-    /// AddAsync only stages the entity — the INSERT happens on SaveChangesAsync.
-    /// This lets the caller do multiple changes in one transaction.
+    /// Stages a new book for insertion. The actual INSERT runs on SaveChangesAsync.
+    /// Grouping multiple changes before saving lets them execute in one transaction.
     /// </summary>
     public async Task AddAsync(Book book)
     {
         await _context.Books.AddAsync(book);
     }
 
+    /// <summary>
+    /// Stages a book for deletion. The DELETE runs on SaveChangesAsync.
+    /// The caller must have already fetched the book — Remove needs a tracked entity.
+    /// </summary>
     public void Delete(Book book)
     {
         _context.Books.Remove(book);
     }
 
+    /// <summary>
+    /// Persists all staged changes to the database in a single transaction.
+    /// Must be called after AddAsync or Delete for changes to take effect.
+    /// </summary>
     public async Task SaveChangesAsync()
     {
         await _context.SaveChangesAsync();
