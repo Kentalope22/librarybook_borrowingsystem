@@ -1,0 +1,176 @@
+# Library Book Borrowing System — API Test Suite
+# Use with VS Code REST Client extension (humao.rest-client)
+# Run each request with "Send Request" above the ### line
+
+@baseUrl = http://localhost:5000
+
+### ─────────────────────────────────────────────────
+###  BOOKS
+### ─────────────────────────────────────────────────
+
+### Get all books (seeded on startup)
+GET {{baseUrl}}/api/books
+
+### Get book by id
+GET {{baseUrl}}/api/books/1
+
+### Get book that doesn't exist → 404
+GET {{baseUrl}}/api/books/9999
+
+### Create a book → 201
+POST {{baseUrl}}/api/books
+Content-Type: application/json
+
+{
+  "title": "Refactoring",
+  "author": "Martin Fowler",
+  "isbn": "978-0134757599",
+  "totalCopies": 2,
+  "availableCopies": 2
+}
+
+### Create book with bad data (AvailableCopies > TotalCopies) → 400
+POST {{baseUrl}}/api/books
+Content-Type: application/json
+
+{
+  "title": "Bad Book",
+  "author": "Author",
+  "isbn": "123",
+  "totalCopies": 1,
+  "availableCopies": 5
+}
+
+### Create book missing required field → 400
+POST {{baseUrl}}/api/books
+Content-Type: application/json
+
+{
+  "author": "No Title Author",
+  "isbn": "123",
+  "totalCopies": 1,
+  "availableCopies": 1
+}
+
+### Update a book
+PUT {{baseUrl}}/api/books/1
+Content-Type: application/json
+
+{
+  "title": "Clean Code (Updated Edition)",
+  "author": "Robert C. Martin",
+  "isbn": "978-0132350884",
+  "totalCopies": 5,
+  "availableCopies": 5
+}
+
+### Delete a book
+DELETE {{baseUrl}}/api/books/3
+
+### ─────────────────────────────────────────────────
+###  MEMBERS
+### ─────────────────────────────────────────────────
+
+### Get all members (seeded on startup)
+GET {{baseUrl}}/api/members
+
+### Get member by id
+GET {{baseUrl}}/api/members/1
+
+### Get member that doesn't exist → 404
+GET {{baseUrl}}/api/members/9999
+
+### Create a member → 201
+POST {{baseUrl}}/api/members
+Content-Type: application/json
+
+{
+  "fullName": "Carol Williams",
+  "email": "carol@example.com"
+}
+
+### Create member with duplicate email → 409
+POST {{baseUrl}}/api/members
+Content-Type: application/json
+
+{
+  "fullName": "Alice Duplicate",
+  "email": "alice@example.com"
+}
+
+### Create member with invalid email → 400
+POST {{baseUrl}}/api/members
+Content-Type: application/json
+
+{
+  "fullName": "Bad Email Person",
+  "email": "not-an-email"
+}
+
+### Update a member
+PUT {{baseUrl}}/api/members/1
+Content-Type: application/json
+
+{
+  "fullName": "Alice Johnson-Smith",
+  "email": "alice.updated@example.com"
+}
+
+### Delete a member
+DELETE {{baseUrl}}/api/members/2
+
+### ─────────────────────────────────────────────────
+###  BORROWING
+### ─────────────────────────────────────────────────
+
+### Get all borrow records
+GET {{baseUrl}}/api/borrow
+
+### Get borrow history for member 1
+GET {{baseUrl}}/api/borrow/member/1
+
+### Get borrow history for non-existent member → 404
+GET {{baseUrl}}/api/borrow/member/9999
+
+### Borrow a book (book 2 has 2 copies, member 1 exists)
+POST {{baseUrl}}/api/borrow
+Content-Type: application/json
+
+{
+  "bookId": 2,
+  "memberId": 1
+}
+
+### Try to borrow the same book again (duplicate) → 409
+POST {{baseUrl}}/api/borrow
+Content-Type: application/json
+
+{
+  "bookId": 2,
+  "memberId": 1
+}
+
+### Borrow book that doesn't exist → 404
+POST {{baseUrl}}/api/borrow
+Content-Type: application/json
+
+{
+  "bookId": 9999,
+  "memberId": 1
+}
+
+### Return a book (use borrow record id from above)
+POST {{baseUrl}}/api/borrow/return
+Content-Type: application/json
+
+{
+  "borrowRecordId": 1
+}
+
+### Try to return already-returned book → 400
+POST {{baseUrl}}/api/borrow/return
+Content-Type: application/json
+
+{
+  "borrowRecordId": 1
+}
