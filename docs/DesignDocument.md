@@ -1,7 +1,7 @@
 # Library Book Borrowing System — Design Document
 
 **Team Name:** [JKubed]
-**Course:** [Course Number and Section]
+**Course:** [CPSC 449-01]
 **Submission Date:** April 26, 2025
 
 ---
