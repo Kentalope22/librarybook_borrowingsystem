@@ -10,19 +10,21 @@ namespace LibraryAPI.Services;
 /// Handles all business logic for borrowing and returning books.
 /// Layer: Service
 ///
-/// This is the most complex service because it must:
-/// 1. Validate book and member existence (404 if missing)
-/// 2. Validate availability (409 if no copies)
-/// 3. Prevent duplicate borrows (409 if member already has it)
-/// 4. Handle concurrent borrow races via optimistic concurrency (409 on conflict)
-/// 5. Keep AvailableCopies accurate on both borrow (decrement) and return (increment)
+/// This is the most complex service because it must coordinate across
+/// three repositories (Book, Member, BorrowRecord) and handle:
 ///
-/// Optimistic concurrency works because Book.RowVersion is a [Timestamp] column.
-/// When EF Core saves the decremented AvailableCopies, it includes
-/// WHERE RowVersion = <value_we_read> in the UPDATE. If another request already
-/// updated that row, the WHERE matches zero rows → DbUpdateConcurrencyException.
-/// We catch it and surface it as a 409 so the client knows to retry.
-/// This prevents AvailableCopies from ever going below 0 under concurrent load.
+/// 1. Existence validation — 404 if book or member not found
+/// 2. Availability validation — 409 if no copies available
+/// 3. Duplicate borrow prevention — 409 if member already has this book
+/// 4. Concurrent borrow race handling — 409 via optimistic concurrency
+/// 5. AvailableCopies accuracy — decrement on borrow, increment on return
+///
+/// How concurrency is handled:
+/// Book has a [Timestamp] RowVersion column. When EF Core saves AvailableCopies--,
+/// it adds WHERE RowVersion = original_value to the UPDATE. If another request
+/// already updated the row (changing RowVersion), EF Core throws
+/// DbUpdateConcurrencyException — we catch it and surface it as 409.
+/// This guarantees AvailableCopies never drops below 0 under concurrent load.
 /// </summary>
 public class BorrowService : IBorrowService
 {
@@ -40,6 +42,9 @@ public class BorrowService : IBorrowService
         _memberRepo = memberRepo;
     }
 
+    /// <summary>
+    /// Returns all borrow records with book and member details included.
+    /// </summary>
     public async Task<IEnumerable<BorrowRecordResponseDto>> GetAllAsync()
     {
         var records = await _borrowRepo.GetAllWithDetailsAsync();
@@ -47,9 +52,9 @@ public class BorrowService : IBorrowService
     }
 
     /// <summary>
-    /// Returns history for a specific member, but first verifies the member exists.
-    /// Returning an empty list for a non-existent member would be misleading — a 404
-    /// is more honest and helps callers detect typos in the member id.
+    /// Returns borrow history for a specific member.
+    /// Verifies the member exists first — returning an empty list for a
+    /// non-existent member would be misleading to the caller.
     /// </summary>
     public async Task<IEnumerable<BorrowRecordResponseDto>> GetByMemberIdAsync(int memberId)
     {
@@ -62,13 +67,12 @@ public class BorrowService : IBorrowService
     }
 
     /// <summary>
-    /// Records a new borrow. Validates existence, availability, and uniqueness, then
-    /// decrements AvailableCopies and saves both changes (book update + new record) in
-    /// a single SaveChangesAsync call so they are atomic.
+    /// Records a new borrow. Validates all business rules, decrements AvailableCopies,
+    /// and saves both changes atomically in a single SaveChangesAsync call.
     ///
-    /// The try/catch around SaveChangesAsync catches DbUpdateConcurrencyException that
-    /// EF Core throws when the RowVersion WHERE clause matches zero rows — meaning
-    /// another request updated the book between our read and our save.
+    /// The try/catch around SaveChangesAsync handles the race condition where two
+    /// requests both read AvailableCopies = 1, both decrement to 0, and both try to save.
+    /// Only one succeeds — the other gets DbUpdateConcurrencyException → 409.
     /// </summary>
     public async Task<BorrowRecordResponseDto> BorrowBookAsync(BorrowRequestDto dto)
     {
@@ -80,14 +84,11 @@ public class BorrowService : IBorrowService
         if (member == null)
             throw new NotFoundException($"Member with id {dto.MemberId} not found");
 
-        // We check availability before the lock so the happy path is fast. The
-        // concurrency catch below handles the race where two requests both see
-        // AvailableCopies = 1 and both try to decrement.
+        // Check availability before the save — fast path for the common case
         if (book.AvailableCopies <= 0)
             throw new ConflictException("No available copies");
 
-        // Prevent duplicate open borrows: a member cannot borrow the same book twice
-        // without returning the first copy.
+        // Prevent a member from borrowing the same book twice without returning it
         var existingBorrow = await _borrowRepo.GetActiveBorrowAsync(dto.BookId, dto.MemberId);
         if (existingBorrow != null)
             throw new ConflictException("Member already has this book borrowed");
@@ -106,20 +107,18 @@ public class BorrowService : IBorrowService
 
         try
         {
-            // SaveChangesAsync persists both the decremented AvailableCopies and the new
-            // BorrowRecord together. If the RowVersion check fails (concurrent update),
-            // EF Core throws DbUpdateConcurrencyException — we catch it and convert to 409.
+            // Single SaveChangesAsync persists both the AvailableCopies decrement
+            // and the new BorrowRecord atomically.
             await _borrowRepo.SaveChangesAsync();
         }
         catch (DbUpdateConcurrencyException)
         {
-            // Another request updated the book (AvailableCopies changed) between our
-            // read and our save. Surface as a conflict so the client can retry.
+            // Another concurrent request updated the book row between our read and save.
+            // Surface as 409 so the client knows to retry.
             throw new ConflictException("Could not complete borrow due to a conflict — please try again");
         }
 
-        // After save, the record.Id is populated by EF Core. We load the navigation
-        // properties from the in-memory variables we already have to avoid an extra DB query.
+        // Populate navigation properties from already-loaded objects to avoid an extra DB round-trip
         record.Book = book;
         record.Member = member;
 
@@ -127,8 +126,9 @@ public class BorrowService : IBorrowService
     }
 
     /// <summary>
-    /// Processes a book return. Validates the record exists and is still open, then
-    /// increments AvailableCopies and marks the record as Returned.
+    /// Processes a book return. Marks the record as Returned, sets ReturnDate,
+    /// and increments AvailableCopies on the book.
+    /// Throws BadRequestException if the record is already returned.
     /// </summary>
     public async Task<BorrowRecordResponseDto> ReturnBookAsync(ReturnRequestDto dto)
     {
@@ -136,9 +136,8 @@ public class BorrowService : IBorrowService
         if (record == null)
             throw new NotFoundException($"Borrow record with id {dto.BorrowRecordId} not found");
 
-        // We check Status rather than ReturnDate because Status is the canonical flag.
-        // ReturnDate alone could be null for reasons other than "not yet returned" in
-        // a more complex model.
+        // Status is the canonical flag — not ReturnDate — because Status is explicit and
+        // unambiguous even if the model is extended later.
         if (record.Status == BorrowStatus.Returned)
             throw new BadRequestException("This book has already been returned");
 
@@ -152,9 +151,9 @@ public class BorrowService : IBorrowService
     }
 
     /// <summary>
-    /// Maps a BorrowRecord (with loaded Book and Member navigation props) to a response DTO.
-    /// Status is serialized as the enum name ("Borrowed" / "Returned") rather than its
-    /// integer value so JSON consumers get a readable string.
+    /// Maps a BorrowRecord (with loaded navigation properties) to a response DTO.
+    /// Status is serialized as the enum name ("Borrowed" / "Returned") so clients
+    /// receive a readable string instead of an integer.
     /// </summary>
     private static BorrowRecordResponseDto MapToDto(BorrowRecord record) => new BorrowRecordResponseDto
     {
