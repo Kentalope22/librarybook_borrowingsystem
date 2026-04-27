@@ -10,11 +10,16 @@ namespace LibraryAPI.Services;
 /// Layer: Service
 ///
 /// Responsible for:
-/// - DTO mapping (entity → response DTO)
+/// - DTO mapping (Member entity → MemberResponseDto)
 /// - Setting MembershipDate on creation (callers must not supply it)
-/// - Email uniqueness enforcement
+/// - Enforcing email uniqueness across all members
 ///
-/// NOT responsible for: HTTP status codes, DbContext access.
+/// NOT responsible for: HTTP status codes or direct database access.
+///
+/// Why enforce email uniqueness here instead of the database?
+/// The in-memory database does not support unique constraints natively.
+/// Even with a real DB, checking here first lets us return a clear 409 message
+/// rather than a raw database constraint violation error.
 /// </summary>
 public class MemberService : IMemberService
 {
@@ -25,6 +30,10 @@ public class MemberService : IMemberService
         _repo = repo;
     }
 
+    /// <summary>
+    /// Returns all members mapped to response DTOs.
+    /// Returns an empty list (not an exception) when no members exist.
+    /// </summary>
     public async Task<IEnumerable<MemberResponseDto>> GetAllAsync()
     {
         var members = await _repo.GetAllAsync();
@@ -32,7 +41,9 @@ public class MemberService : IMemberService
     }
 
     /// <summary>
-    /// Returns a single member or throws NotFoundException.
+    /// Returns a single member by id, or throws NotFoundException.
+    /// Returning null would force every caller to null-check — exceptions
+    /// let the controller handle it in one place.
     /// </summary>
     public async Task<MemberResponseDto> GetByIdAsync(int id)
     {
@@ -44,12 +55,13 @@ public class MemberService : IMemberService
     }
 
     /// <summary>
-    /// Creates a member. MembershipDate is set here to DateTime.UtcNow, not from the
-    /// request — callers must not be able to backdate their own membership.
-    /// Email uniqueness is checked first to give a clear 409 rather than a DB-level error.
+    /// Creates a new member. Enforces email uniqueness before writing.
+    /// MembershipDate is always set to the current UTC time — callers cannot
+    /// backdate their own membership.
     /// </summary>
     public async Task<MemberResponseDto> CreateAsync(MemberRequestDto dto)
     {
+        // Check uniqueness before insert to give a clear 409 message
         var existing = await _repo.GetByEmailAsync(dto.Email);
         if (existing != null)
             throw new ConflictException($"A member with email '{dto.Email}' already exists");
@@ -58,7 +70,7 @@ public class MemberService : IMemberService
         {
             FullName = dto.FullName,
             Email = dto.Email,
-            MembershipDate = DateTime.UtcNow
+            MembershipDate = DateTime.UtcNow  // Set here — not from the request
         };
 
         await _repo.AddAsync(member);
@@ -68,9 +80,10 @@ public class MemberService : IMemberService
     }
 
     /// <summary>
-    /// Updates a member. If the email is being changed, check that the new email is not
-    /// already taken by a different member (comparing ids avoids false positive when the
-    /// email is unchanged).
+    /// Updates a member's name and email. If the email is changing, verifies
+    /// the new email is not already taken by a different member.
+    /// Comparing ids (emailOwner.Id != id) prevents a false positive when the
+    /// member submits their own existing email unchanged.
     /// </summary>
     public async Task<MemberResponseDto> UpdateAsync(int id, MemberRequestDto dto)
     {
@@ -90,6 +103,9 @@ public class MemberService : IMemberService
         return MapToDto(member);
     }
 
+    /// <summary>
+    /// Deletes a member from the system. Throws NotFoundException if the id is invalid.
+    /// </summary>
     public async Task DeleteAsync(int id)
     {
         var member = await _repo.GetByIdAsync(id);
@@ -100,6 +116,10 @@ public class MemberService : IMemberService
         await _repo.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// Maps a Member entity to a MemberResponseDto.
+    /// Private to the service — controllers should never do entity-to-DTO mapping.
+    /// </summary>
     private static MemberResponseDto MapToDto(Member member) => new MemberResponseDto
     {
         Id = member.Id,
